@@ -1,9 +1,13 @@
 """CSV to database or vice versa."""
+from __future__ import print_function
+
 import csv
 import fnmatch
+import io
 import os.path
 import sys
 
+import six
 import sqlalchemy.sql.util
 import sqlalchemy.types
 
@@ -58,7 +62,7 @@ def _get_verbose_prints(verbose):
         # Also, space-pad to keep the cursor in a known column
         num_spaces = 66 - len(truncated_thing)
 
-        print "%s...%s" % (truncated_thing, ' ' * num_spaces),
+        print("%s...%s" % (truncated_thing, ' ' * num_spaces), end='')
         sys.stdout.flush()
 
     if sys.stdout.isatty():
@@ -91,7 +95,7 @@ def _get_verbose_prints(verbose):
             pass
 
         def print_done(msg='ok'):
-            print msg
+            print(msg)
 
     return print_start, print_status, print_done
 
@@ -194,16 +198,20 @@ def load(session, tables=[], directory=None, drop_tables=False, verbose=False, s
 
         try:
             csvpath = "%s/%s.csv" % (directory, table_name)
-            csvfile = open(csvpath, 'rb')
+            csvfile = open(csvpath, 'r')
         except IOError:
             # File doesn't exist; don't load anything!
             print_done('missing?')
             continue
 
-        csvsize = os.stat(csvpath).st_size
+        # XXX This is wrong for files with multi-line fields, but Python 3
+        # doesn't allow .tell() on a file that's currently being iterated
+        # (because the result is completely bogus).  Oh well.
+        csvsize = sum(1 for line in csvfile)
+        csvfile.seek(0)
 
         reader = csv.reader(csvfile, lineterminator='\n')
-        column_names = [unicode(column) for column in reader.next()]
+        column_names = [six.text_type(column) for column in next(reader)]
 
         if not safe and engine.dialect.name == 'postgresql':
             # Postgres' CSV dialect works with our data, if we mark the not-null
@@ -251,10 +259,12 @@ def load(session, tables=[], directory=None, drop_tables=False, verbose=False, s
             session.commit()
             new_rows[:] = []
 
-            progress = "%d%%" % (100 * csvfile.tell() // csvsize)
+            progress = "%d%%" % (100 * csvpos // csvsize)
             print_status(progress)
 
+        csvpos = 0
         for csvs in reader:
+            csvpos += 1
             row_data = {}
 
             for column_name, value in zip(column_names, csvs):
@@ -269,7 +279,7 @@ def load(session, tables=[], directory=None, drop_tables=False, verbose=False, s
                         value = False
                     else:
                         value = True
-                else:
+                elif isinstance(value, bytes):
                     # Otherwise, unflatten from bytes
                     value = value.decode('utf-8')
 
@@ -392,9 +402,13 @@ def dump(session, tables=[], directory=None, verbose=False, langs=None):
         else:
             filename = '%s/%s.csv' % (directory, table_name)
 
-        writer = csv.writer(open(filename, 'wb'), lineterminator='\n')
-
-        columns = [col.name for col in table.columns]
+        # CSV module only works with bytes on 2 and only works with text on 3!
+        if six.PY3:
+            writer = csv.writer(open(filename, 'w', newline=''), lineterminator='\n')
+            columns = [col.name for col in table.columns]
+        else:
+            writer = csv.writer(open(filename, 'wb'), lineterminator='\n')
+            columns = [col.name.encode('utf8') for col in table.columns]
 
         # For name tables, always dump rows for official languages, as well as
         # for those in `langs` if specified.
@@ -432,7 +446,9 @@ def dump(session, tables=[], directory=None, verbose=False, langs=None):
                     elif val == False:
                         val = '0'
                     else:
-                        val = unicode(val).encode('utf-8')
+                        val = six.text_type(val)
+                        if not six.PY3:
+                            val = val.encode('utf8')
 
                     csvs.append(val)
 
